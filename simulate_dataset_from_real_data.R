@@ -2,7 +2,7 @@ source("ustensiles.R") # build raw dataset
 
 
 #### Simulate spoon survival data (n = 200) using empirical properties
-#### - Uses your original `spoons` and `visits` data as templates
+#### - Uses `spoons` data and `visits` data as templates
 #### - Extends visits from 2018-10-01 to 2022-10-01 by repeating observed intervals
 #### - Fits a discrete-time logistic model to empirical events (v1..v15)
 #### - Simulates 200 spoons by sampling covariates from original spoons
@@ -39,7 +39,7 @@ extended_vis_df <- tibble(
   date = as.Date(extended_dates),
   visit_name = paste0("v", visit_index)
 )
-# prune so final date equals or matches target exactly? We keep visits up to <= target
+# prune so final date equals or matches target exactly. We keep visits up to <= target
 extended_vis_df <- extended_vis_df %>% filter(date <= end_date_target)
 
 
@@ -48,7 +48,8 @@ extended_vis_df <- extended_vis_df %>% filter(date <= end_date_target)
 #    We'll build a discrete-time dataset per spoon × visit (for visits 1..15)
 # ---------------------------
 # helper to pivot the original spoons presence to long
-spoon_presence_long <- spoons %>%
+spoon_presence_long <- 
+  spoons %>%
   select(id, attractiveness, weight, similitude, type, starts_with("v")) %>%
   pivot_longer(cols = starts_with("v"), names_to = "visit_name", values_to = "present") %>%
   mutate(visit_index = as.integer(str_remove(visit_name, "^v")) ) %>%
@@ -101,7 +102,8 @@ message("Original number of right-censored spoons (no disappearance by v15): ", 
 #    and the measured spoon-level covariates. This gives an empirical per-interval hazard model.
 # ---------------------------
 # Convert categorical covariates to factors (as in typical ecological models)
-spoon_dt <- spoon_dt %>%
+spoon_dt <- 
+  spoon_dt %>%
   mutate(
     weight = factor(weight, levels = c("light","normal","heavy")),
     similitude = factor(similitude),
@@ -122,10 +124,11 @@ summary(hazard_model)
 # ---------------------------
 set.seed(42) # reproducible
 
-n_sim <- 200
+n_sim <- 400
 
 # Sample spoon covariates with replacement from original spoons (to replicate trait distributions)
-cov_sample <- spoons %>%
+cov_sample <- 
+  spoons %>%
   select(attractiveness, weight, similitude, type) %>%
   slice_sample(n = n_sim, replace = TRUE) %>%
   mutate(id = paste0("sim", sprintf("%03d", seq_len(n_sim)))) %>%
@@ -139,32 +142,42 @@ message("Extended monitoring visits: ", n_vis_extended, " (from ", min(extended_
 # We'll use the numeric visit index as predictor directly — for extended visits, continue visit_index = 1..N_extended
 
 # Simulate discrete-time hazard per visit: P(event at visit t | alive at t-1) = plogis(Xb)
+
 sim_records <- vector("list", n_sim)
 
 for (i in seq_len(n_sim)) {
+  
   row_cov <- cov_sample[i, ]
   alive <- TRUE
-  event_occurred <- FALSE
   sim_rows <- list()
+  
   for (t in seq_len(n_vis_extended)) {
+    
     if (!alive) break
-    # build a newdata row for prediction
+    
+    # Prepare covariates for prediction
     newd <- tibble(
       attractiveness = as.integer(row_cov$attractiveness),
-      weight = factor(row_cov$weight, levels = levels(spoon_dt$weight)),
-      similitude = factor(row_cov$similitude, levels = levels(spoon_dt$similitude)),
-      type = factor(row_cov$type, levels = levels(spoon_dt$type)),
+      weight = factor(row_cov$weight,
+                      levels = levels(spoon_dt$weight)),
+      similitude = factor(row_cov$similitude,
+                          levels = levels(spoon_dt$similitude)),
+      type = factor(row_cov$type,
+                    levels = levels(spoon_dt$type)),
       visit_index = t
     )
-    # Predicted probability of event this interval
-    p_event <- predict(hazard_model, newdata = newd, type = "response")
-    # Draw whether event occurs at this visit
+    
+    # Estimate probability of disappearance
+    p_event <- predict(
+      hazard_model,
+      newdata = newd,
+      type = "response"
+    )
+    
+    # Simulate disappearance
     ev <- rbinom(1, 1, p_event)
-    # Record presence: if no event yet, present = 1 at this visit, else for the visit of event present should be 0
-    # We'll define presence as 1 if no event has happened up to that visit (inclusive)
-    present <- if_else(ev == 1, 0L, 1L) # but careful: when event triggers, present == 0 at that visit
-    # The ecologically sensible encoding: presence at visit t is 1 if not yet disappeared before t.
-    # We want event==1 at the visit when present == 0 for the first time. Above sim does that.
+    
+    # Record observation
     sim_rows[[t]] <- tibble(
       id = row_cov$id,
       attractiveness = row_cov$attractiveness,
@@ -175,51 +188,51 @@ for (i in seq_len(n_sim)) {
       date = extended_vis_df$date[t],
       p_event = p_event,
       event = ev,
-      # present: if event == 1 at this visit, then present == 0 (disappeared at observation)
-      present = as.integer(ifelse(ev == 1, 0, 1))
+      present = 1L - ev
     )
+    
+    # First disappearance terminates observation
     if (ev == 1) {
       alive <- FALSE
-      event_occurred <- TRUE
     }
-    # if ev == 0, remain alive and continue
   }
-  # If never event across all visits, mark censored = 1
-  sim_df_i <- bind_rows(sim_rows)
-  sim_df_i <- sim_df_i %>%
-    group_by(id) %>%
-    mutate(
-      # if event occurred, event_visit is first event==1; otherwise NA
-      event_visit = if_else(any(event == 1), min(visit_index[event == 1]), NA_integer_),
-      censored = if_else(is.na(event_visit), 1L, 0L),
-      # convert presence to reflect cumulative disappearance (if event happened earlier, subsequent visits absent)
-      present = {
-        if (!is.na(event_visit)) {
-          as.integer(ifelse(visit_index < event_visit, 1L, ifelse(visit_index == event_visit, 0L, 0L)))
-        } else {
-          # never disappeared
-          rep(1L, n())
-        }
-      }
-    ) %>% ungroup()
-  sim_records[[i]] <- sim_df_i
+  
+  # Store observations for this spoon
+  sim_records[[i]] <- bind_rows(sim_rows)
+  
 }
 
+# Combine all simulated observations
 sim_long <- bind_rows(sim_records)
+
 
 # derive a per-spoon summary: time (in visits) and status (1=event, 0=censored)
 sim_summary <- sim_long %>%
   group_by(id, attractiveness, weight, similitude, type) %>%
   summarize(
-    time_visits = if_else(any(event == 1), min(visit_index[event == 1]), max(visit_index)),
-    event = if_else(any(event == 1), 1L, 0L),
-    date_event = if_else(event == 1, date[which.min(ifelse(event == 1, visit_index, Inf))], as.Date(NA)),
+    time_visits = max(visit_index),
+    event = max(event),
+    date_event = if (max(event) == 1) {
+      date[which(event == 1)[1]]
+    } else {
+      as.Date(NA)
+    },
     .groups = "drop"
+  ) %>% 
+  mutate(
+    weight = factor(weight, levels = c("light","normal","heavy")),
+    similitude = factor(similitude),
+    type = factor(type),
+    attractiveness = as.integer(attractiveness)
   )
 
 # Wide format: presence at each visit (v1..vN) for each simulated spoon
 sim_wide <- sim_long %>%
-  select(id, visit_name = paste0("v", visit_index), visit_index, present) %>%
+  mutate(visit_name = paste0("v", .$visit_index)) %>% 
+  select(id, 
+         visit_name,
+         visit_index, 
+         present) %>%
   pivot_wider(names_from = visit_index, values_from = present, names_prefix = "v") %>%
   left_join(sim_summary, by = "id") %>%
   left_join(cov_sample, by = "id")
@@ -244,6 +257,7 @@ message("Simulated sampled types counts:\n"); print(sim_cov_counts)
 surv_fit_sim <- survfit(Surv(time_visits, event) ~ 1, data = sim_summary)
 print(summary(surv_fit_sim))
 
+
 # Fit a Cox model on simulated data (example) using covariates
 # (time_visits in visits; we treat visit intervals as equally spaced here)
 cox_sim <- coxph(Surv(time_visits, event) ~ attractiveness + weight + similitude + type, data = sim_summary)
@@ -263,6 +277,4 @@ summary(cox_sim)
 # write_csv(sim_summary, "sim_spoon_summary.csv")
 # write_csv(sim_long, "sim_spoon_long.csv")
 # write_csv(sim_wide, "sim_spoon_wide.csv")
-
-message("Simulation complete. Objects available: sim_long, sim_summary, sim_wide, extended_vis_df, hazard_model.")
 

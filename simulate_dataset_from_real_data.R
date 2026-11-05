@@ -261,7 +261,7 @@ print(summary(surv_fit_sim))
 # Fit a Cox model on simulated data (example) using covariates
 # (time_visits in visits; we treat visit intervals as equally spaced here)
 cox_sim <- coxph(Surv(time_visits, event) ~ attractiveness + weight + similitude + type, data = sim_summary)
-summary(cox_sim)
+summary(cox_sim) # weight violates zph 
 
 # ---------------------------
 # 6. Outputs to return to user

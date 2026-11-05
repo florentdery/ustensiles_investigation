@@ -44,29 +44,73 @@ require(ggsurvfit)
 
 sim_long = 
   sim_long %>% 
-  mutate(time_disappearance = as.integer(date-dmy("01-10-2018")) 
-         )
-  
-
-survfit2(Surv(time_disappearance, event) ~ 1, data = sim_long) |>
+  mutate(time_disappearance = as.integer(date-dmy("01-10-2018")), 
+         weight=factor(weight, levels = c("light", "heavy", "normal")))
+# fast data exploration   ####
+glob = survfit2(Surv(time_disappearance, event) ~ 1, data = sim_long) |>
   ggsurvfit()+
   add_confidence_interval() +
-  add_censor_mark()
+  add_censor_mark()+
+  scale_x_continuous("Temps depuis début du suivi (semaines)",
+                     breaks = seq(0,150, 21), 
+                     labels = seq(0,150, 21)/7)+
+  scale_y_continuous("Probabilité de survie",
+                     breaks = seq(0,1,0.2))
 
-survfit2(Surv(time_disappearance, event) ~ factor(similitude), data = sim_long) |>
+
+(simi = 
+  survfit2(Surv(time_disappearance, event) ~ factor(similitude), data = sim_long) |>
   ggsurvfit()+
   add_confidence_interval() +
-  add_censor_mark()
+  add_censor_mark()+
+    scale_x_continuous("Temps depuis début du suivi (semaines)",
+                       breaks = seq(0,150, 21), 
+                       labels = seq(0,150, 21)/7)+
+    scale_y_continuous("Probabilité de survie",
+                     breaks = seq(0,1,0.2))+
+    scale_fill_manual(values  = c("red", "darkblue"))+
+    scale_color_manual(values  = c("red", "darkblue"))+
+    theme_bw()
+    
+    
+)
 
-survfit2(Surv(time_disappearance, event) ~ factor(type), data = sim_long) |>
+(type =
+  survfit2(Surv(time_disappearance, event) ~ factor(type), data = sim_long) |>
   ggsurvfit()+
   add_confidence_interval() +
-  add_censor_mark()
+  add_censor_mark()+
+  scale_x_continuous("Temps depuis début du suivi (semaines)",
+                     breaks = seq(0,150, 21), 
+                     labels = seq(0,150, 21)/7)+
+  scale_y_continuous("Probabilité de survie",
+                     breaks = seq(0,1,0.2))+
+    scale_fill_manual(values  = c("seagreen", "black"))+
+    scale_color_manual(values  = c("seagreen", "black"))+
+    theme_bw()
+)
 
-survfit2(Surv(time_disappearance, event) ~ factor(weight), data = sim_long) |>
+
+(wei = 
+  survfit2(Surv(time_disappearance, event) ~ factor(weight), data = sim_long) |>
   ggsurvfit()+
   add_confidence_interval() +
-  add_censor_mark()
+  add_censor_mark()+
+    scale_x_continuous("Temps depuis début du suivi (semaines)",
+                       breaks = seq(0,150, 21), 
+                       labels = seq(0,150, 21)/7)+
+    scale_y_continuous("Probabilité de survie",
+                     breaks = seq(0,1,0.2))+
+  scale_fill_manual(values  = c("black","gold", "purple"))+
+  scale_color_manual(values  = c("black","orange", "purple4"))+
+    theme_bw()
+  )
+
+require(patchwork)
+(glob|type)/(simi|wei)
+
+ggsave("km_curves.jpeg", width = 9, height = 6, dpi =300)
+
 
 # append real time of disapearance: 
 dizz = 
@@ -139,6 +183,212 @@ survival::cox.zph(cox_2)
 
 
 # Plots ####
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(forcats)
+
+# Extract coefficients and variance-covariance matrix
+b <- coef(cox_tv)
+V <- vcov(cox_tv)
+
+# Coefficient names
+names(b)
+
+# Time sequence for weight effects
+hr_weight <- tibble(
+  time = seq(
+    min(sim_sum$time_disappearance),
+    max(sim_sum$time_disappearance),
+    length.out = 200
+  )
+) %>%
+  mutate(
+    log_time = log(time)
+  )
+
+# Function to calculate time-varying HR and CI
+get_tv_hr <- function(b_main, b_time, V, log_time) {
+  
+  log_hr <- b[b_main] + b[b_time] * log_time
+  
+  var_log_hr <-
+    V[b_main, b_main] +
+    log_time^2 * V[b_time, b_time] +
+    2 * log_time * V[b_main, b_time]
+  
+  se <- sqrt(var_log_hr)
+  
+  tibble(
+    log_hr = as.numeric(log_hr),
+    hr = exp(log_hr),
+    lower = exp(log_hr - 1.96 * se),
+    upper = exp(log_hr + 1.96 * se)
+  )
+}
+
+# Heavy vs light
+hr_heavy <- get_tv_hr(
+  "weightheavy",
+  "tt(I(weight == \"heavy\"))",
+  V,
+  hr_weight$log_time
+)
+
+# Normal vs light
+hr_normal <- get_tv_hr(
+  "weightnormal",
+  "tt(I(weight == \"normal\"))",
+  V,
+  hr_weight$log_time
+)
+
+# Combine
+hr_weight <- bind_rows(
+  mutate(hr_heavy, time = hr_weight$time, weight = "Lourde"),
+  mutate(hr_normal, time = hr_weight$time, weight = "Normale")
+)
+
+
+hrw=
+  ggplot(
+  hr_weight,
+  aes(x = time, y = hr, colour = weight, fill = weight)
+) +
+  geom_ribbon(
+    aes(ymin = lower, ymax = upper),
+    alpha = 0.5,
+    colour = NA
+  ) +
+  geom_line(linewidth = 1) +
+  geom_hline(
+    yintercept = 1,
+    linetype = "dashed",
+    colour = "grey40"
+  ) +
+  scale_y_log10() +
+  scale_x_continuous(breaks = seq(0,150,21),
+                     labels = seq(0,150,21)/7)+
+  labs(
+    x = "Temps depuis l'introduction\n(semaines)",
+    y = "",
+    colour = "Poids",
+    fill = "Poids"
+  ) +
+  scale_fill_manual(values  = c("gold", "purple"))+
+  scale_color_manual(values  = c("orange", "purple4"))+
+  theme_classic() +
+  theme(
+    legend.position = "right"
+  )
+
+
+
+hr_carac <- tibble(
+  term = c("caracsoup_alike", "caracsoup_different")
+) %>%
+  rowwise() %>%
+  mutate(
+    log_hr = b[term],
+    se = sqrt(V[term, term]),
+    hr = exp(log_hr),
+    lower = exp(log_hr - 1.96 * se),
+    upper = exp(log_hr + 1.96 * se)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    carac = recode(
+      term,
+      "caracsoup_alike" = "Soupe, similaire",
+      "caracsoup_different" = "Soupe, différente"
+    )
+  )
+
+
+hr_carac
+
+carac = ggplot(
+  hr_carac,
+  aes(x = carac, y = hr, ymin = lower, ymax = upper)
+) +
+  geom_pointrange(linewidth = 0.7) +
+  geom_hline(
+    yintercept = 1,
+    linetype = "dashed",
+    colour = "grey40"
+  ) +
+  scale_y_log10() +
+  labs(
+    x = "Cuiller à :\n(Ref. = Cuiller à dessert différente )" ,
+    y = "Risque de disparaître ± 95% IC"
+  ) +
+  theme_bw()
+
+cowplot::plot_grid(carac, hrw, rel_widths = c(.4,.6), ncol = 2)
+ggsave("hr_ratios.jpeg", width = 8, height = 4, dpi =300)
+
+
+
+
+# Contrasts test ####
+b <- coef(cox_tv)
+V <- vcov(cox_tv)
+
+# Contraste entre les deux catégories
+contrast <- b["caracsoup_alike"] -
+  b["caracsoup_different"]
+
+se_contrast <- sqrt(
+  V["caracsoup_alike", "caracsoup_alike"] +
+    V["caracsoup_different", "caracsoup_different"] -
+    2 * V["caracsoup_alike", "caracsoup_different"]
+)
+
+z <- contrast / se_contrast
+p_value <- 2 * pnorm(-abs(z))
+
+# Résultats
+exp(contrast)
+exp(contrast + c(-1, 1) * 1.96 * se_contrast)
+p_value
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ARCHIVES ####
 ggplot(hr_weight, 
        aes(x = term, y = estimate,
                       ymin = conf.low, ymax = conf.high)) +
